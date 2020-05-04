@@ -3,9 +3,6 @@ from typing import Tuple
 import numpy as np
 
 from processes.mdp import MDP
-from processes.mdp_rep_for_adp_pg import MDPRepForADPPG
-from processes.mdp_rep_for_rl_pg import MDPRepForRLPG
-from processes.mdp_rep_for_rl_tabular import MDPRepForRLTabular
 from processes.mp_funcs import flatten_sasf_dict
 from processes.mp_funcs import flatten_ssf_dict
 from processes.mp_funcs import get_rv_gen_func
@@ -72,17 +69,8 @@ class MDPRefined(MDP):
             self.gamma
         )
 
-    def get_mdp_rep_for_rl_tabular(self) -> MDPRepForRLTabular:
-        return MDPRepForRLTabular(
-            state_action_dict=self.state_action_dict,
-            terminal_states=self.terminal_states,
-            state_reward_gen_dict=get_state_reward_gen_dict(
-                self.transitions,
-                self.rewards_refined
-            ),
-            gamma=self.gamma
-        )
 
+    """
     def get_mdp_rep_for_adp_pg(self) -> MDPRepForADPPG:
         return MDPRepForADPPG(
             gamma=self.gamma,
@@ -97,20 +85,9 @@ class MDPRefined(MDP):
             # transitions_func=lambda s, a: self.transitions[s][a],
             terminal_state_func=lambda s: s in self.terminal_states
         )
+   """
 
-    def get_mdp_rep_for_rl_pg(self) -> MDPRepForRLPG:
-        return MDPRepForRLPG(
-            gamma=self.gamma,
-            init_state_gen_func=get_rv_gen_func_single(
-                {s: 1. / len(self.state_action_dict) for s in
-                 self.state_action_dict.keys()}
-            ),
-            state_reward_gen_func=lambda s, a: get_state_reward_gen_func(
-                self.transitions[s][a],
-                self.rewards_refined[s][a],
-            )(),
-            terminal_state_func=lambda s: s in self.terminal_states,
-        )
+
 
 
 if __name__ == '__main__':

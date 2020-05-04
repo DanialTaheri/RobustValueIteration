@@ -1,6 +1,7 @@
 from typing import Mapping, Set, Tuple, Generic
 from utils.gen_utils import zip_dict_of_tuple, is_approx_eq
 from processes.mp_funcs import get_all_states, get_actions_for_states
+#Transition function
 from processes.mp_funcs import verify_mdp, get_lean_transitions
 from processes.policy import Policy
 from processes.det_policy import DetPolicy
