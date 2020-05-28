@@ -21,12 +21,14 @@ class FuncApproxBase(ABC):
         self.feature_funcs: Sequence[Callable[[X], float]] =\
             ([FuncApproxBase.get_unit_func] if add_unit_feature else []) + feature_funcs
         self.num_features = len(self.feature_funcs)
+        print("test:", self.num_features)
         self.reglr_coeff = reglr_coeff
         self.learning_rate = learning_rate
         self.adam = adam
         self.adam_decay1 = adam_decay1
         self.adam_decay2 = adam_decay2
         self.params: List[np.ndarray] = self.init_params()
+        print("self.params", self.params)
         self.adam_caches: Tuple[List[np.ndarray], List[np.ndarray]]\
             = self.init_adam_caches()
 
@@ -43,6 +45,11 @@ class FuncApproxBase(ABC):
             -> List[Callable[[X], float]]:
         return [(lambda x, v=v: 1. if x == v else 0.) for v in values]
 
+    @staticmethod
+    def get_inv_feature_funcs(values: Set[X], n: int):
+        return [(lambda x, i=i: x[i]) for i in range(n)] +  [(lambda x, v=v: 1. if x[2] == v else 0.) for v in values]
+    
+    
     def get_feature_vals(self, x_vals: X) -> np.ndarray:
         return np.array([f(x_vals) for f in self.feature_funcs])
 

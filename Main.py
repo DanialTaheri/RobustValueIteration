@@ -15,25 +15,30 @@ from dp.dp_numeric import DPNumeric
 import json
 import os
 import FigureFunc
+import collections
+from parser import parse_args
+import math
 
 StateType = Tuple[int, ...]
 # DP algorithm
 
-class InvEnv(NamedTuple):
-    L_max: float
-    L_min: float
-    mu_inflow: Sequence[float]
-    sigma_inflow: Sequence[float]
-    mu_price: Sequence[float]
-    sigma_price: Sequence[float]
-    epoch_disc_factor: float
-    failure_cost: float
-    condition_ini: float
-    av_det: float
-    adjust_rate: float
-    prod_cap: float
-    len_month: int
-    gran: float
+class InvEnv:
+    def __init__(self, mu_price, args):
+        self.L_max = args.L_max
+        self.L_min = args.L_min
+        self.epoch_disc_factor = args.epoch_disc_factor
+        self.failure_cost = args.failure_cost
+        self.condition_ini = args.condition_ini
+        self.av_det = args.av_det
+        self.adjust_rate = args.adjust_rate
+        self.prod_cap = args.prod_cap
+        self.len_month = args.len_month
+        self.gran = args.gran
+        self.mu_inflow = eval(args.inflow_mean)
+        self.sigma_inflow = eval(args.inflow_std)
+        self.sigma_price = eval(args.price_std)
+        self.mu_price = mu_price
+        self.model_type = args.model_type
 
     def validate_spec(self) -> bool:
         b1 = self.L_max > 0.
@@ -49,27 +54,15 @@ class InvEnv(NamedTuple):
     def get_all_states(self) -> Set[StateType]:
         # reservior level
         on_hand_range = list(np.arange(int(self.L_min), int(self.L_max + 1), self.gran))
-        if self.av_det == 0.:
-            current_cond = list([0.])
+        if self.av_det == 0:
+            current_cond = list([0])
         else:
-            current_cond = list(np.arange(self.condition_ini, 1.41, self.av_det))
+            current_cond = list(np.arange(self.condition_ini, 110, self.av_det))
         month = range(self.len_month)
         return set(product(
             *chain([on_hand_range], [current_cond], [month])
         ))
 
-    # Order of operations in an epoch are:
-    # 1) Order Placement (Action)
-    # 2) Receipt
-    # 3) Throwout Space-Limited-Excess Inventory
-    # 4) Demand
-    # 5) Adjust (Negative) Inventory to not fall below stockout limit
-
-    # In the following func, the input "state" is represented by
-    # the on-hand and on-order right before an order is placed (the very
-    # first event in the epoch) and the "state"s in the output are represented
-    # by the  on-hand and on-order just before the next order is placed (in the
-    # next epoch).  Both the input and output "state"s are arrays of length (L+1).
 
     def get_next_states_probs_rewards(
             self,
@@ -80,10 +73,9 @@ class InvEnv(NamedTuple):
             model
     ) -> Mapping[StateType, Tuple[float, float]]:
         next_state_arr: ndarray = np.array(state)
-        #print("next_state_arr, action", next_state_arr, action)
-        # The next line represents state change due to Action and Receipt[1 if next_state_arr[2] < 11 else -11]
-        next_state_arr += np.append([-action *self.adjust_rate, self.av_det if action > 0. else 0.],
-                                    [1 if next_state_arr[2] < self.len_month-1 else -(self.len_month-1)])
+        next_state_arr += np.append([-action *self.adjust_rate, self.av_det if action > 0. else\
+                                     0],[1 if next_state_arr[2] < self.len_month-1 else\
+                                     -(self.len_month-1)])
         #next_state_arr += np.append(-action *self.adjust_rate, self.av_det if action > 0 else 0.)
 
         # The next line represents state change due to demand
@@ -92,7 +84,7 @@ class InvEnv(NamedTuple):
         for price, prob_pr in price_probs:
             #there is no need to create a cost for the failure since we can ensure that the plant never fails by considering 
             # the initial condition to be less than a threshold
-            reward = action * price if next_state_arr[1] < 1. else 0.
+            reward = action * price if next_state_arr[1] <= 100. else 0.
             #- (self.failure_cost if next_state_arr[1] > 1. else 0.)  
             
             for inflow, prob_in in inflow_probs:
@@ -116,20 +108,16 @@ class InvEnv(NamedTuple):
             if model == "nominal":
                 avg_r = sum((p1/len(inflow_probs) * r 
                             for p1, _, r in tl))/(sum_p1) if sum_p1 != 0. else 0.
-                #print("sum of probabilities",sum((p2/len(price_probs) for _, p2, _ in tl))/(sum_p2) if sum_p2 != 0. else 0.)
-                #print("action, avg_r", action, avg_r)
                 ret[s] = (sum_p2, avg_r)
                 
-#                 print("state:", s)
-#                 print("action: {}, reward : {}".format(action, ret[s][1]))
+
             elif model == "robust":
                 r_list = [r for p1, _, r in tl if p1 != 0]
-#                 print(s)
-#                 print(action, r_list)
+
                 if r_list:
                     worst_r = min(r_list)
-                    worst_r = sum((p1/len(inflow_probs) * worst_r 
-                            for p1, _, _ in tl))/(sum_p1) if sum_p1 != 0. else 0.
+                    #worst_r = sum((p1/len(inflow_probs) * worst_r 
+                    #        for p1, _, _ in tl))/(sum_p1) if sum_p1 != 0. else 0.
                     
                 else:
                     worst_r = 0.
@@ -137,7 +125,6 @@ class InvEnv(NamedTuple):
                 ret[s] = (sum_p2, worst_r)
             else:
                 raise ValueError("Model is not selected appropriately")
-                
         return ret
 
     def get_mdp_refined_dict(self, model) \
@@ -146,12 +133,18 @@ class InvEnv(NamedTuple):
                                Mapping[StateType,
                                        Tuple[float, float]]]]:
         ret_price, ret_inflow = self.get_exogenous_state()
-        #print("pp_inflow", pp_inflow)
         return {s: {a: self.get_next_states_probs_rewards(s, a, ret_inflow[s[-1]], ret_price[s[-1]], model)
                     for a in np.arange(0, self.get_all_actions(s), self.gran)}
                 for s in self.get_all_states()}
 
     def get_exogenous_state(self):
+        # to project the inflow to the closest acceptable inflow representations 
+        def find_closest_state(gran, initial_point):
+            if gran - (initial_point % gran) < initial_point % gran:
+                res = gran - (initial_point % gran)
+            else:
+                res = - (initial_point % gran)
+            return initial_point + res + self.L_min
         # self.mu_price is a list
         rv_price = [0] * self.len_month
         rv_inflow = [0] * self.len_month
@@ -161,33 +154,55 @@ class InvEnv(NamedTuple):
         pp_inflow = [0] * self.len_month
         ret_inflow = [[] for _ in range(self.len_month)]
         ret_price = [[] for _ in range(self.len_month)]
+        self.gran_price = 1.
+        if self.model_type == 'nominal':
+            Start_cdf = 0.01
+            End_cdf = 1.-Start_cdf
+        else:
+            Start_cdf = 0.2
+            End_cdf = 1-Start_cdf
         for month in range(self.len_month):
-            rv_price[month] = lognorm(s= self.sigma_price[month], scale = self.mu_price[month])
-            rv_inflow[month] = lognorm(s = self.sigma_inflow[month], scale = self.mu_inflow[month])
-            raw_price_probs[month] = [rv_price[month].cdf(i) for i in np.arange(0, int(rv_price[month].ppf(0.999)), self.gran)]
-            raw_inflow_probs[month] = [rv_inflow[month].cdf(i) for i in np.arange(0, int(rv_inflow[month].ppf(0.999)), self.gran)]
+            rv_price[month] = lognorm(s= self.sigma_price[month],\
+                                      scale = math.exp(self.mu_price[month]))
+            rv_inflow[month] = lognorm(s = self.sigma_inflow[month],\
+                                       scale = math.exp(self.mu_inflow[month]))
+            
+            raw_price_probs[month] = \
+            [rv_price[month].cdf(i) for i in np.arange(int(rv_price[month].ppf(Start_cdf)),\
+                                                       int(rv_price[month].ppf(End_cdf)),\
+                                                       self.gran_price)]
+            # inflow: needs to project to the closest point feasible for the model
+            Start_point_inflow = find_closest_state(self.gran, int(rv_inflow[month].ppf(Start_cdf)))
+            raw_inflow_probs[month] = \
+            [rv_inflow[month].cdf(i) for i in np.arange(Start_point_inflow,\
+                                                       int(rv_inflow[month].ppf(End_cdf)),\
+                                                        self.gran)]
+            
+            
             pp_price[month] = [p / sum(raw_price_probs[month]) for p in raw_price_probs[month]]
-            pp_inflow[month] = [p / sum(raw_inflow_probs[month]) for p in raw_inflow_probs[month]]
-            for i, num in enumerate(np.arange(0, int(rv_price[month].ppf(0.999)), self.gran)):
-                ret_price[month].append([num, pp_price[month][i]])
-            for i, num in enumerate(np.arange(0, int(rv_inflow[month].ppf(0.999)), self.gran)):
+
+            pp_inflow[month] = [p / sum(raw_inflow_probs[month]) for p in\
+                                raw_inflow_probs[month]]
+            
+            
+            for i, num in enumerate(np.arange(int(rv_price[month].ppf(Start_cdf)),\
+                                              int(rv_price[month].ppf(End_cdf)), self.gran_price)):
+                ret_price[month].append([num, pp_price[month][i]])        
+            for i, num in enumerate(np.arange(Start_point_inflow,\
+                                              int(rv_inflow[month].ppf(End_cdf)), self.gran)):
                 ret_inflow[month].append([num, pp_inflow[month][i]])
-            #print(ret_inflow[month])
                 
-        #print({month: ret_inflow[month] for month in range(self.len_month)})
         return {month: ret_price[month] for month in range(self.len_month)}, {month: ret_inflow[month] for month in range(self.len_month)}
         
             
             
 
-    # Actions given the inventory 
+     
     def get_all_actions(self, state):
-        if state[1] >= 1.:
+        if state[1] >= 100:
             cap = self.gran
         else:
             cap = max(min(self.prod_cap, (state[0] - self.L_min)* (1/self.adjust_rate)), self.gran)
-#             if state[0] > 90:
-#                 print("cap", cap)
         return cap
         
         
@@ -211,60 +226,46 @@ class InvEnv(NamedTuple):
 if __name__ == '__main__':
     import time
     start = time.time()
-        #initial parameters
-    kwargs = {"L_max":500, "L_min":1. ,"mu_inflow":[10., 10., 10., 15., 15., 15., 20., 20., 20., 15., 15, 15.]  , "sigma_inflow":[3.] * 12,
-           "mu_price": [30., 30., 30., 20., 20., 20., 10., 10., 10., 20., 20., 20.] * 12,"sigma_price": [4.] *12, "epoch_disc_factor":0.95, "gran": 0.5,
-           "failure_cost":10., "condition_ini":0., "av_det": 0.05,"adjust_rate": 1, "prod_cap": 20., "len_month":12}
-
-#    kwargs = {"L_max":50., "L_min":40. ,"mu_inflow":[1., 1., 1., 1.5, 1.5, 1.5, 2., 2., 2., 1.5, 1.5, 1.5]  , "sigma_inflow":[0.5] * 12,
-#          "mu_price": [3., 3., 3., 2., 2., 2., 1., 1., 1., 2., 2., 2.] * 12,"sigma_price": [0.5] *12, "epoch_disc_factor":0.95, "gran": 0.5,
-#          "failure_cost":10., "condition_ini":0., "av_det": 0.,"adjust_rate": 1, "prod_cap": 20., "len_month":12}
-
-
-
-    # month and reservior level
-#     kwargs = {"L_max":200., "L_min":40. ,"mu_inflow":[1., 1., 1., 1.5, 1.5, 1.5, 2., 2., 2., 1.5, 1.5, 1.5]  , "sigma_inflow":[0.5] * 12,
-#           "mu_price": [3., 3., 3., 2., 2., 2., 1., 1., 1., 2., 2., 2.] * 12,"sigma_price": [0.5] *12, "epoch_disc_factor":0.95, "gran": 0.5,
-#           "failure_cost":10., "condition_ini":0., "av_det": 0.,"adjust_rate": 1, "prod_cap": 20., "len_month":12}
-
-    # reservior level and condition of plant
-#     kwargs = {"L_max":20., "L_min":1. ,"mu_inflow":[3.2, 3.2, 3.2, 3.2, 3.2, 3.2, 3.2, 3.2, 3.2, 5., 5., 5.]  , "sigma_inflow":[1.] * 12,
-#           "mu_price": [2.] * 12,"sigma_price": [0.5] *12, "epoch_disc_factor":0.96, 
-#           "failure_cost":10., "condition_ini":0., "av_det": 0.2,"adjust_rate": 1, "prod_cap": 5., "len_month":1}
-
+    args = parse_args()
+    print(args)
+    if args.price_category == '1':
+        mu_price = [2.549615, 2.501999, 2.431512, 2.354458, 2.288651, 2.249327, 2.245656,\
+                    2.278644, 2.340898, 2.418321, 2.493343, 2.548944, 2.572555]
+    elif args.price_category == '2':
+        mu_price = [3.105615, 3.057999, 2.987512, 2.910458, 2.844651, 2.805327, 2.801656,\
+                    2.834644, 2.896898, 2.974321, 3.049343, 3.104944, 3.128555]
+    elif args.price_category == '3':
+        mu_price = [3.515115, 3.467499, 3.397012, 3.319958, 3.254151, 3.214827, 3.211156,\
+                    3.244144, 3.306398, 3.383821, 3.458843, 3.514444, 3.538055]
+    elif args.price_category == '4':
+        mu_price = [3.885615, 3.837999, 3.767512, 3.690458, 3.624651, 3.585327, 3.581656, \
+                    3.614644, 3.676898, 3.754321, 3.829343, 3.884944, 3.908555]
+    elif args.price_category == '5':
+        mu_price = [4.445615, 4.397999, 4.327512, 4.250458, 4.184651, 4.145327, 4.141656,\
+                    4.174644, 4.236898, 4.314321, 4.389343, 4.444944, 4.468555]
+    else:
+        raise ValueError("Please enter an acceptable price category")
 
 
-#     resservior level
-#     kwargs = {"L_max":100., "L_min":1. ,"mu_inflow":[1., 1., 1., 2., 2., 2., 3., 3., 3., 2., 2., 2.]  , "sigma_inflow":[0.5] * 12,
-#            "mu_price": [2.] * 12,"sigma_price": [0.5] *12, "epoch_disc_factor":0.95, "gran": 1.,
-#           "failure_cost":10., "condition_ini":0., "av_det": 0.,"adjust_rate":1,"prod_cap": 10.,
-#           "len_month":1}
-
-    inv = InvEnv(**kwargs)
+    inv = InvEnv(mu_price, args)
     States = inv.get_all_states()
     
     if not inv.validate_spec():
         raise ValueError
-    mdp_ref_obj_nominal = inv.get_mdp_refined(model = "nominal")
-    #mdp_ref_obj_robust = inv.get_mdp_refined(model = "robust")
-    this_tolerance = 1e-2
-    dp_obj_nominal = DPNumeric(mdp_ref_obj_nominal, this_tolerance)
+    mdp_ref_obj = inv.get_mdp_refined(model = args.model_type)
+    dp_obj = DPNumeric(mdp_ref_obj, args.this_tolerance)
     #dp_obj_robust = DPNumeric(mdp_ref_obj_robust, this_tolerance)
     
-    def criter(x: Tuple[Tuple[int, ...], int]) -> int:
-        return sum(x[0])
+    if args.model_type == "nominal":
+        print("calculating the value iteration")
+        opt_policy, value_function = dp_obj.get_optimal_policy_vi()
+    else:
+        opt_policy, value_function = dp_obj.get_optimal_policy_Robust_vi()        
 
-    opt_policy, value_function = dp_obj_nominal.get_optimal_policy_vi()
-    #opt_policy_robust, value_function_robust = dp_obj_robust.get_optimal_policy_Robust_vi()        
-    experiment_path = "Results/"
-    if not os.path.exists(experiment_path):
-        os.makedirs(experiment_path)
-    if not os.path.exists(experiment_path + "/DP/"):
-        os.makedirs(experiment_path + "/DP/")
-    config_path = experiment_path + "/DP/config.json"
-    with open(config_path, "w") as f:
-        json.dump(kwargs, f)
-    results = experiment_path + "/DP/VF_Pol.txt"
+    if not os.path.exists(args.experiment_path):
+        os.makedirs(args.experiment_path)
+    results = args.experiment_path + "VF-model%s-category%s-capacity%s.txt"%(args.model_type, args.price_category, args.prod_cap)
+    print("results", results)
     output= open(results, 'wt')
     for s in States:
         output.write("States: {}, Optimal value function: {}\n".format(s, value_function[s]))
@@ -275,41 +276,19 @@ if __name__ == '__main__':
     execution_time = end - start
     output.write("Execution time: {}".format(execution_time))
     output.close()
-
-
-
-#     Data = {}
-#     import matplotlib
-#     import matplotlib.pyplot as plt
-#     month = []
-#     res_level = []
-#     for s in States:
-#         if s[2] == 7:
-#             Data[s[0]] = value_function[s]
     
-#     for key in Data.keys():
-#         res_level.append(key)
-#     res_level = sorted(set(res_level))
-#     values = np.zeros(len(res_level))
-#     for i, elem1 in enumerate(res_level):
-#         values[i] = Data[elem1]
-#     der_value = np.zeros(len(res_level)-1)
-#     der_res = np.zeros(len(res_level)-1)
-#     for num in range(1, len(res_level)):
-#         der_value[num-1] = (values[num] - values[num-1]) /kwargs['gran']
-#         der_res[num-1] = res_level[num] 
-    
-#     #res_level and derivative
-#     fig = plt.figure()
-#     fig.subplots_adjust()
-#     ax1 = fig.add_subplot(111)
-#     ax1.set_xlabel("reservior level")
-#     ax1.set_title("Value Iteration")
-#     ax1.set_xlim(kwargs['L_min'], kwargs['L_max'])
-#     ax1.plot(der_res, der_value, label = "Der. of VF with granularity %s"%kwargs['gran'])
-#     #ax1.plot(res_level, values, label = "Value function")
-#     ax1.legend()
-#     plt.show()    
-#     policyplot(opt_policy, States, kwargs["prod_cap"])
-#     policyplot(opt_policy_robust, States, kwargs["prod_cap"])
+    # creating the table
+    table = collections.defaultdict(list)
+    for state in States:
+        
+        table[int(state[-1])].append([int (state[0]), int(state[1]), value_function[state]])
+        
+    Table_filename = args.experiment_path + "Table-model%s-category%s-capacity%s.json"%(args.model_type ,args.price_category, args.prod_cap)
+    with open(Table_filename, "w") as f:
+        json.dump(table, f)
+        
+
+
+
+
     
